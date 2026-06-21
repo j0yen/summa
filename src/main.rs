@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use summa::{ingest, index, links, log, page, vault};
+use summa::{ingest, index, links, lint, log, page, vault};
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +36,18 @@ enum Commands {
     },
     /// Parse all wikilinks in the vault and report orphans, dangling, malformed
     Links {
+        /// Output JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run vault health checks (orphans, dangling, malformed, missing-index, stale, un-ingested)
+    Lint {
+        /// Apply mechanical repairs (malformed links, index regeneration)
+        #[arg(long)]
+        fix: bool,
+        /// Also repair malformed links in human-authored notes (requires --fix)
+        #[arg(long)]
+        include_human: bool,
         /// Output JSON instead of human-readable text
         #[arg(long)]
         json: bool,
@@ -117,6 +129,15 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 links::print_human(&report);
+            }
+        }
+        Commands::Lint { fix, include_human, json } => {
+            let opts = lint::LintOpts { fix, include_human, json };
+            let report = lint::run(&vault_root, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                lint::print_human(&report);
             }
         }
         Commands::Page { kind } => match kind {
