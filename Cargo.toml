@@ -1,0 +1,37 @@
+[package]
+name = "summa"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "CLI mechanics layer for summa: an LLM-maintained wiki on Obsidian vaults"
+authors = ["Joe Yen <jyen.tech@gmail.com>"]
+license = "MIT"
+
+[[bin]]
+name = "summa"
+path = "src/main.rs"
+
+[lib]
+name = "summa"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+walkdir = "2"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+pdf-extract = "0.7"
+ureq = { version = "2", features = ["tls"] }
+html2text = "0.6"
+sigpipe = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+strip = true
