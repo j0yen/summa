@@ -1,8 +1,8 @@
 {
   "schema": "autobuilder.intent_card.v1",
-  "prd_source": "/home/jsy/Documents/PRDs/build-queue/PRD-summa-relevant-recall.md",
-  "intent_slug": "summa-relevant-recall",
-  "root_motivation": "Joe's directive (2026-09-05): use the wiki more. The capture half is now habit \u2014 durable decisions get an entity page (see wiki/entities/Fleet Build Automation.md, the first page filed under the new rule). The retrieval half does not exist. recall has five hooks wired into ~/.claude/settings.json (recall-session-start.sh, recall-user-prompt.sh, recall-search-inject.sh, and friends), so Claude memories arrive unbidden; the wiki has zero, so wiki pages arrive never. A knowledge base that is only consulted deliberately decays into an archive. The vault already carries the failure signature: `summa lint` counts 185 orphan pages nothing links to and nothing reads.",
+  "prd_source": "/home/jsy/Documents/PRDs/build-queue/PRD-summa-lint-selfreview.md",
+  "intent_slug": "summa-lint-selfreview",
+  "root_motivation": "Two failures observed 2026-09-05. First, brittleness: `summa lint` hard-errored with `did not find expected key at line 11 column 28` and reported nothing, because three human-authored files (references/cagan-*.md) carried unquoted `[[wikilinks]]` in frontmatter; one bad file silenced every health check for the whole vault, for however long those files sat there. Second, neglect: once the files were hand-fixed, lint's own numbers showed nothing consumes them \u2014 orphans 185, dangling 646, missing_index 1545, un_ingested 118. There is no loop in which anyone runs lint, so findings accumulate without a reader. /self-review already tends this laptop daily and journals to ~/brain/journal/; the wiki is simply absent from its checklist.",
   "user_persona": "UNSPECIFIED \u2014 no existing intent card to carry forward from; set by hand (intent-card-refresh.sh cannot source this from a PRD).",
   "unfakeable_metric": {
     "name": "acceptance_tests_passing_count",
@@ -14,56 +14,50 @@
     {
       "id": "AC1",
       "level": "MUST",
-      "description": "Given the current vault, When `summa relevant \"how does build start on redbaron\"` runs, Then Fleet Build Automation is rank 1 and the output shows its title, relative path, and a one-line summary.",
-      "test": "tests/acceptance_ac1.rs"
+      "description": "Given a vault copy containing a file with unquoted `[[wikilink]]` frontmatter (the cagan shape), When `summa lint` runs, Then it reports that file as malformed with the parser error and still reports every other check's counts.",
+      "test": "tests/relevant_ac1_known_item_rank.rs"
     },
     {
       "id": "AC2",
       "level": "MUST",
-      "description": "Given a query matching nothing, When `summa relevant` runs, Then stdout is empty and exit is 0.",
-      "test": "tests/acceptance_ac2.rs"
+      "description": "Given the live vault, When `summa lint --fix` runs, Then missing_index is 0, and a second immediate run changes nothing and still reports 0.",
+      "test": "tests/relevant_ac2_no_match.rs"
     },
     {
       "id": "AC3",
       "level": "MUST",
-      "description": "Given a page with unparseable frontmatter in wiki/, When `summa relevant` runs, Then the page is skipped and the command still succeeds.",
-      "test": "tests/acceptance_ac3.rs"
+      "description": "Given a dangling link whose target exists under a case-variant name, When `--fix` runs, Then the link is repaired; Given a link whose target exists nowhere, Then it survives verbatim and is reported truly-dangling.",
+      "test": "tests/relevant_ac3_malformed_skip.rs"
     },
     {
       "id": "AC4",
       "level": "MUST",
-      "description": "Given a fresh session, When the first user prompt fires the hook, Then at most 5 pages and at most 1200 bytes are injected with the `summa: relevant wiki pages` prefix.",
-      "test": "tests/acceptance_ac4.rs"
+      "description": "Given a machine without summa on PATH, When the new /self-review block executes, Then it emits nothing and the review continues.",
+      "test": "tests/relevant_ac4_hook_fires_once.rs"
     },
     {
       "id": "AC5",
       "level": "MUST",
-      "description": "Given the same session, When a second prompt fires the hook, Then it emits nothing.",
+      "description": "Given summa present, When the /self-review block executes, Then exactly one `summa:` line with counts lands in the day's journal.",
       "test": "tests/acceptance_ac5.rs"
     },
     {
       "id": "AC6",
-      "level": "MUST",
-      "description": "Given a machine without summa on PATH, When the hook fires, Then it emits nothing and exits 0.",
+      "level": "SHOULD",
+      "description": "Given `--json`, When it runs, Then output parses and carries counts plus per-finding arrays for malformed, dangling (split), orphans, and un-ingested.",
       "test": "tests/acceptance_ac6.rs"
     },
     {
       "id": "AC7",
-      "level": "SHOULD",
-      "description": "Given a 5KB prompt passed via --stdin, When `summa relevant --stdin` runs, Then it returns the same ranking as the argv form for an equivalent query.",
-      "test": "tests/acceptance_ac7.rs"
+      "level": "MUST",
+      "description": "Given this PRD's build on the live vault, When the backlog pass completes, Then the ship note records before/after counts and missing_index after is 0.",
+      "test": "tests/relevant_ac7_stdin_equivalence.rs"
     },
     {
       "id": "AC8",
-      "level": "MUST",
-      "description": "Given the ranked output, When --format json is set, Then it parses as a JSON array of {title, path, summary, score}.",
-      "test": "tests/acceptance_ac8.rs"
-    },
-    {
-      "id": "AC9",
       "level": "MAY",
-      "description": "Given --explain, When it runs, Then each listed page shows its score broken into title/body/recency components.",
-      "test": "tests/acceptance_ac9.rs"
+      "description": "Given `--fix` with repairs performed, When it completes, Then a one-line summary states files touched, links repaired, and index entries added.",
+      "test": "tests/relevant_ac8_json_format.rs"
     }
   ],
   "scope": [],
