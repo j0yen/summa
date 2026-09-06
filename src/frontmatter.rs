@@ -11,7 +11,7 @@ pub enum PageType {
 }
 
 impl PageType {
-    #[allow(clippy::should_implement_trait)] // named to match the `summa:` value, not std::str::FromStr
+    #[allow(clippy::should_implement_trait)] // named to match the `summa:` value, not std::str::FromStr — infallible, not the FromStr trait
     pub fn from_str(s: &str) -> Self {
         match s {
             "entity" => PageType::Entity,

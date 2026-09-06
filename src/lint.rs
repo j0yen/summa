@@ -9,6 +9,7 @@
 //!  6. un-ingested   — raw PDFs / Clippings/*.md with no source-summary pointing at them
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -22,7 +23,9 @@ use crate::{frontmatter, index, links, log, vault};
 pub struct LintReport {
     pub orphans: Vec<String>,
     pub dangling: Vec<DanglingItem>,
+    pub repairable_dangling: Vec<RepairableDanglingItem>,
     pub malformed: Vec<MalformedItem>,
+    pub malformed_frontmatter: Vec<MalformedFrontmatterItem>,
     pub missing_index: Vec<String>,
     pub stale_vs_source: Vec<StaleItem>,
     pub un_ingested: Vec<String>,
@@ -36,11 +39,29 @@ pub struct DanglingItem {
     pub in_files: Vec<String>,
 }
 
+/// A dangling link whose target exists under a normalizable name (case,
+/// spacing, or a known alias) — `--fix` rewrites it to `canonical`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepairableDanglingItem {
+    pub target: String,
+    pub canonical: String,
+    #[serde(rename = "in")]
+    pub in_files: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MalformedItem {
     pub file: String,
     pub raw: String,
     pub fix: String,
+}
+
+/// A file whose frontmatter block failed to parse as YAML. The run
+/// continues past it — this is reported, never fatal.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MalformedFrontmatterItem {
+    pub file: String,
+    pub error: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +89,12 @@ pub struct LintOpts {
 // ─── public entry point ─────────────────────────────────────────────────────
 
 pub fn run(root: &Path, opts: &LintOpts) -> Result<LintReport> {
-    let mut report = LintReport::default();
+    // 0. Malformed frontmatter — collected first and independently of every
+    // other check, so one bad file never takes the rest of the run down.
+    let mut report = LintReport {
+        malformed_frontmatter: check_malformed_frontmatter(root),
+        ..LintReport::default()
+    };
 
     // Build the links graph (reuse links module)
     let links_report = links::run(root)?;
@@ -76,12 +102,22 @@ pub fn run(root: &Path, opts: &LintOpts) -> Result<LintReport> {
     // 1. Orphans
     report.orphans = links_report.orphans.clone();
 
-    // 2. Dangling
+    // 2. Dangling — split into repairable (case/spacing/alias-normalizable)
+    // and truly-dangling.
     report.dangling = links_report
         .dangling
         .iter()
         .map(|d| DanglingItem {
             target: d.target.clone(),
+            in_files: d.in_files.clone(),
+        })
+        .collect();
+    report.repairable_dangling = links_report
+        .repairable_dangling
+        .iter()
+        .map(|d| RepairableDanglingItem {
+            target: d.target.clone(),
+            canonical: d.canonical.clone(),
             in_files: d.in_files.clone(),
         })
         .collect();
@@ -100,6 +136,10 @@ pub fn run(root: &Path, opts: &LintOpts) -> Result<LintReport> {
     if opts.fix {
         let fixes = apply_malformed_fixes(root, &report.malformed, opts.include_human)?;
         report.fixed.extend(fixes);
+
+        let link_fixes =
+            apply_repairable_fixes(root, &report.repairable_dangling, opts.include_human)?;
+        report.fixed.extend(link_fixes);
     }
 
     // 4. Missing-index
@@ -133,12 +173,20 @@ pub fn run(root: &Path, opts: &LintOpts) -> Result<LintReport> {
         .iter()
         .filter(|f| f.change.starts_with("added missing"))
         .count();
+    let fixed_links = report
+        .fixed
+        .iter()
+        .filter(|f| f.change.starts_with("repaired link:"))
+        .count();
     let note = format!(
-        "fixed {} malformed links, {} missing-index pages; orphans={} dangling={} stale={} un-ingested={}",
+        "fixed {} malformed links, {} repaired links, {} missing-index pages; orphans={} dangling={} repairable={} malformed_frontmatter={} stale={} un-ingested={}",
         fixed_malformed,
+        fixed_links,
         fixed_index,
         report.orphans.len(),
         report.dangling.len(),
+        report.repairable_dangling.len(),
+        report.malformed_frontmatter.len(),
         report.stale_vs_source.len(),
         report.un_ingested.len(),
     );
@@ -227,9 +275,11 @@ fn check_stale_vs_source(root: &Path) -> Result<Vec<StaleItem>> {
             Err(_) => continue,
         };
 
-        let fm = match frontmatter::parse_frontmatter(&content)? {
-            Some(fm) => fm,
-            None => continue,
+        // Malformed frontmatter is reported separately (check_malformed_frontmatter);
+        // here it just means this file has nothing more to say about staleness.
+        let fm = match frontmatter::parse_frontmatter(&content) {
+            Ok(Some(fm)) => fm,
+            Ok(None) | Err(_) => continue,
         };
 
         // Only source-summary pages
@@ -296,6 +346,42 @@ fn format_system_time(t: SystemTime) -> String {
     use chrono::{DateTime, Utc};
     let dt: DateTime<Utc> = t.into();
     dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+// ─── check: malformed frontmatter ───────────────────────────────────────────
+
+/// Walk every markdown file and try to parse its frontmatter block as YAML.
+/// A file with no frontmatter, or with a `---`-delimited block that parses
+/// cleanly, is not reported here — only a present-but-unparseable block is
+/// a finding. This never returns `Err`: a bad file becomes a data point, not
+/// an abort.
+fn check_malformed_frontmatter(root: &Path) -> Vec<MalformedFrontmatterItem> {
+    let md_files = vault::enumerate_md(root);
+    let mut malformed = Vec::new();
+
+    for path in &md_files {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let (fm_str, _) = frontmatter::split_frontmatter(&content);
+        let fm_str = match fm_str {
+            Some(s) => s,
+            None => continue,
+        };
+
+        if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(fm_str) {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            malformed.push(MalformedFrontmatterItem {
+                file: rel.to_string_lossy().into_owned(),
+                error: e.to_string(),
+            });
+        }
+    }
+
+    malformed.sort_by(|a, b| a.file.cmp(&b.file));
+    malformed
 }
 
 // ─── check: un-ingested ─────────────────────────────────────────────────────
@@ -398,6 +484,77 @@ fn apply_malformed_fixes(
     Ok(fixes)
 }
 
+// ─── fix: repairable dangling links ─────────────────────────────────────────
+
+/// Rewrite `[[target]]` (optionally with a `#section` and/or `|alias`) to
+/// `[[canonical]]`, preserving any section/alias, in every file that
+/// referenced a repairable target. Truly-dangling targets are never touched.
+fn apply_repairable_fixes(
+    root: &Path,
+    repairable: &[RepairableDanglingItem],
+    include_human: bool,
+) -> Result<Vec<FixRecord>> {
+    // Group by file: a file may reference more than one repairable target.
+    let mut by_file: HashMap<String, Vec<&RepairableDanglingItem>> = HashMap::new();
+    for item in repairable {
+        for f in &item.in_files {
+            by_file.entry(f.clone()).or_default().push(item);
+        }
+    }
+
+    let mut fixes = Vec::new();
+
+    for (rel_file, items) in &by_file {
+        let abs_path = root.join(rel_file);
+        let content = match std::fs::read_to_string(&abs_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let is_owned = frontmatter::is_summa_owned(&content);
+        if !is_owned && !include_human {
+            // Skip human files unless --include-human
+            continue;
+        }
+
+        let mut new_content = content.clone();
+        for item in items {
+            // Match [[target]], [[target#section]], [[target|alias]], and
+            // [[target#section|alias]] — section/alias are preserved verbatim.
+            let pattern = format!(
+                r"\[\[{}(#[^\]|]*)?(\|[^\]]*)?\]\]",
+                regex::escape(&item.target)
+            );
+            let re = match Regex::new(&pattern) {
+                Ok(re) => re,
+                Err(_) => continue,
+            };
+            if !re.is_match(&new_content) {
+                continue;
+            }
+            let canonical = item.canonical.clone();
+            new_content = re
+                .replace_all(&new_content, move |caps: &regex::Captures| {
+                    let section = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let alias = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                    format!("[[{}{}{}]]", canonical, section, alias)
+                })
+                .into_owned();
+            fixes.push(FixRecord {
+                file: rel_file.clone(),
+                change: format!("repaired link: [[{}]] → [[{}]]", item.target, item.canonical),
+            });
+        }
+
+        if new_content != content {
+            std::fs::write(&abs_path, &new_content)
+                .with_context(|| format!("failed to write {}", rel_file))?;
+        }
+    }
+
+    Ok(fixes)
+}
+
 // ─── human-readable output ──────────────────────────────────────────────────
 
 pub fn print_human(report: &LintReport) {
@@ -408,12 +565,28 @@ pub fn print_human(report: &LintReport) {
         println!("  {}", o);
     }
 
-    println!("\nDangling ({}):", report.dangling.len());
+    println!("\nDangling — truly-dangling ({}):", report.dangling.len());
     for d in &report.dangling {
         println!("  [[{}]] referenced in:", d.target);
         for f in &d.in_files {
             println!("    {}", f);
         }
+    }
+
+    println!(
+        "\nDangling — repairable ({}):",
+        report.repairable_dangling.len()
+    );
+    for d in &report.repairable_dangling {
+        println!("  [[{}]] → [[{}]] referenced in:", d.target, d.canonical);
+        for f in &d.in_files {
+            println!("    {}", f);
+        }
+    }
+
+    println!("\nMalformed frontmatter ({}):", report.malformed_frontmatter.len());
+    for m in &report.malformed_frontmatter {
+        println!("  {} : {}", m.file, m.error);
     }
 
     println!("\nMalformed ({}):", report.malformed.len());
@@ -444,5 +617,24 @@ pub fn print_human(report: &LintReport) {
         for f in &report.fixed {
             println!("  {}: {}", f.file, f.change);
         }
+
+        let files_touched: HashSet<&str> =
+            report.fixed.iter().map(|f| f.file.as_str()).collect();
+        let links_repaired = report
+            .fixed
+            .iter()
+            .filter(|f| f.change.starts_with("fixed:") || f.change.starts_with("repaired link:"))
+            .count();
+        let index_entries_added = report
+            .fixed
+            .iter()
+            .filter(|f| f.change.starts_with("added missing"))
+            .count();
+        println!(
+            "\nfix summary: {} files touched, {} links repaired, {} index entries added",
+            files_touched.len(),
+            links_repaired,
+            index_entries_added,
+        );
     }
 }
