@@ -6,4 +6,5 @@ pub mod links;
 pub mod lint;
 pub mod log;
 pub mod page;
+pub mod relevant;
 pub mod vault;
