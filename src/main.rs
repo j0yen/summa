@@ -126,6 +126,20 @@ enum PageCommands {
         #[arg(long = "cite")]
         cites: Vec<String>,
     },
+    /// File a decision entry on an entity page (create-or-append, idempotent)
+    Decision {
+        /// Title of the entity (Title Case)
+        title: String,
+        /// Entry text to log verbatim; newlines are folded to spaces
+        #[arg(long)]
+        entry: Option<String>,
+        /// Mention to append alongside the entry: "[[SourceLink]] — claim"
+        #[arg(long)]
+        mention: Option<String>,
+        /// Override the entry's date (ISO, e.g. 2026-09-01); default is today
+        #[arg(long)]
+        date: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -173,6 +187,26 @@ fn main() -> Result<()> {
             }
             PageCommands::Answer { question, slug, body, cites } => {
                 page::answer(&vault_root, &question, &slug, &body, &cites)?;
+            }
+            PageCommands::Decision { title, entry, mention, date } => {
+                if entry.is_none() && mention.is_none() && date.is_none() {
+                    // Bare form: print the existing log, newest first.
+                    let log = page::decision_log(&vault_root, &title)?;
+                    for line in log {
+                        println!("{}", line);
+                    }
+                } else {
+                    let appended = page::decision(
+                        &vault_root,
+                        &title,
+                        entry.as_deref(),
+                        mention.as_deref(),
+                        date.as_deref(),
+                    )?;
+                    if entry.is_some() && !appended {
+                        println!("duplicate entry, not appended");
+                    }
+                }
             }
         },
         Commands::Relevant { query, stdin, limit, format, explain } => {
