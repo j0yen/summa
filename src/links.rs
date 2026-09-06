@@ -145,9 +145,18 @@ pub fn run(root: &Path) -> Result<LinksReport> {
     let mut normalized_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
     // Normalized alias -> [paths], sourced from each page's `aliases:` frontmatter.
     let mut alias_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // The vault's established link convention is a page's frontmatter `title`
+    // (index.rs and page.rs both write `[[title]]`), which commonly differs
+    // from its on-disk (often slugified) stem. A repair must rewrite to the
+    // *title*, not the stem — otherwise it fights index regeneration forever.
+    let mut title_map: HashMap<PathBuf, String> = HashMap::new();
+    // Exact title text -> [paths]; an exact-title link is already canonical
+    // and resolves like an exact-stem match — never a repair candidate.
+    let mut title_map_case: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
     for path in &md_files {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        if let Some(stem) = stem {
             stem_map
                 .entry(stem.to_lowercase())
                 .or_default()
@@ -163,7 +172,7 @@ pub fn run(root: &Path) -> Result<LinksReport> {
         }
 
         // Malformed frontmatter is reported by `lint`; here we just skip it —
-        // a page with no usable aliases is not a repair candidate source.
+        // a page with no usable aliases/title is not a repair candidate source.
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(Some(fm)) = crate::frontmatter::parse_frontmatter(&content) {
                 if let Some(aliases) = fm.aliases {
@@ -174,7 +183,21 @@ pub fn run(root: &Path) -> Result<LinksReport> {
                             .push(path.clone());
                     }
                 }
+                let title = fm.title.unwrap_or_else(|| stem.unwrap_or("").to_string());
+                normalized_map
+                    .entry(normalize_title(&title))
+                    .or_default()
+                    .push(path.clone());
+                title_map_case
+                    .entry(title.clone())
+                    .or_default()
+                    .push(path.clone());
+                title_map.insert(path.clone(), title);
+            } else if let Some(stem) = stem {
+                title_map.insert(path.clone(), stem.to_string());
             }
+        } else if let Some(stem) = stem {
+            title_map.insert(path.clone(), stem.to_string());
         }
     }
 
@@ -214,10 +237,15 @@ pub fn run(root: &Path) -> Result<LinksReport> {
 
         // Resolve targets
         for target in &targets {
-            // Exact case match always wins first — this is what keeps two
-            // pages differing only in case from ever being merged by the
-            // normalization fallback below.
-            if let Some(resolved) = stem_map_case.get(target).and_then(|v| v.first()) {
+            // Exact match (stem or title) always wins first — this is what
+            // keeps two pages differing only in case from ever being merged
+            // by the normalization fallback below, and what keeps an
+            // already-canonical title link from being flagged as a repair.
+            if let Some(resolved) = stem_map_case
+                .get(target)
+                .and_then(|v| v.first())
+                .or_else(|| title_map_case.get(target).and_then(|v| v.first()))
+            {
                 *inbound.entry(resolved.clone()).or_insert(0) += 1;
                 continue;
             }
@@ -233,11 +261,19 @@ pub fn run(root: &Path) -> Result<LinksReport> {
 
             if let Some(resolved) = repair_candidate {
                 *inbound.entry(resolved.clone()).or_insert(0) += 1;
-                let canonical = resolved
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(target)
-                    .to_string();
+                // Repair to the vault's established link convention: the
+                // target page's title (falling back to its stem), matching
+                // what index.rs/page.rs already write.
+                let canonical = title_map
+                    .get(resolved)
+                    .cloned()
+                    .or_else(|| {
+                        resolved
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| target.clone());
                 let entry = repairable_map
                     .entry(target.clone())
                     .or_insert_with(|| (canonical, HashSet::new()));
