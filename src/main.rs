@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use summa::{ingest, index, links, lint, log, page, vault};
+use std::io::Read;
+use summa::{ingest, index, links, lint, log, page, relevant, vault};
 
 #[derive(Parser)]
 #[command(
@@ -57,6 +58,29 @@ enum Commands {
         #[command(subcommand)]
         kind: PageCommands,
     },
+    /// Rank wiki pages by lexical relevance to a query
+    Relevant {
+        /// Query text (omit when using --stdin)
+        query: Option<String>,
+        /// Read the query from stdin instead of argv
+        #[arg(long)]
+        stdin: bool,
+        /// Max number of pages to return
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = RelevantFormat::Md)]
+        format: RelevantFormat,
+        /// Show per-page score components
+        #[arg(long)]
+        explain: bool,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RelevantFormat {
+    Md,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +175,25 @@ fn main() -> Result<()> {
                 page::answer(&vault_root, &question, &slug, &body, &cites)?;
             }
         },
+        Commands::Relevant { query, stdin, limit, format, explain } => {
+            let query_str = if stdin {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                query.unwrap_or_default()
+            };
+            let opts = relevant::RelevantOpts { limit, explain };
+            let pages = relevant::run(&vault_root, &query_str, &opts)?;
+            match format {
+                RelevantFormat::Json => {
+                    println!("{}", serde_json::to_string(&pages)?);
+                }
+                RelevantFormat::Md => {
+                    relevant::print_human(&pages);
+                }
+            }
+        }
     }
 
     Ok(())

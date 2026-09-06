@@ -54,11 +54,9 @@ pub fn parse_wikilinks(content: &str) -> (Vec<String>, Vec<(String, String)>) {
             // Extract target (before \|)
             let target = inner.split("\\|").next().unwrap_or("").trim().to_string();
             // Alias is the part after \|
-            let alias = inner.splitn(2, "\\|").nth(1).unwrap_or("").trim().to_string();
-            // Fix: strip the alias entirely if all-digit, else keep as proper |
-            let fix = if alias.chars().all(|c| c.is_ascii_digit()) && !alias.is_empty() {
-                format!("[[{}]]", target)
-            } else if alias.is_empty() {
+            let alias = inner.split_once("\\|").map(|x| x.1).unwrap_or("").trim().to_string();
+            // Fix: strip the alias entirely if all-digit or empty, else keep as proper |
+            let fix = if alias.is_empty() || alias.chars().all(|c| c.is_ascii_digit()) {
                 format!("[[{}]]", target)
             } else {
                 format!("[[{}|{}]]", target, alias)
