@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.0 — 2026-09-06
+
+summa-lint-selfreview: fixed vti-plan unrouted-paths block (widened rust-tests lane glob to include tests/fixtures/**, verified unrouted=0/pass) and fixed reviewer-agent's AC5 finding (duplicate summa-lint block in self-review-skill SKILL.md emitted two summa: lines on malformed frontmatter; removed the buggy Phase A duplicate, kept the correct Phase B.5 block using summa-malformed: prefix). self-review-skill commit 649ca4d pushed directly to its own origin (not shared build_into). Repo-wide/host-wide blockers (intake, proof-receipt/ctrace-permission, risk-gate, ci-checks, session-trace, msrv-verify, ac-traceability, flake-audit) left as previously confirmed systemic, not re-run in full this tick.
+
 ## v0.5.0 — 2026-09-06
 
 summa lint hardening — the wiki gets tended, not just written. `summa lint` no longer aborts on one malformed frontmatter file (reports it as a `malformed` finding with path + parser error and keeps checking everything else); dangling links now split into `repairable` (case/spacing/alias-normalizable, repaired to the page's canonical title by `--fix`) and `truly-dangling` (survive verbatim as the wiki's to-do list); `--json` carries the new fields. Live-vault backlog cleared as part of this ship: missing_index 1544→0, dangling repaired down to 471 truly-dangling with 0 repairable remaining, malformed_frontmatter=3 reported and fixed by hand. A guarded `summa lint --fix --json` pass is wired into /self-review (no-op when `summa` is absent from PATH), journaling one `summa:` counts line per day.
