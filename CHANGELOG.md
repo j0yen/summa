@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.0 — 2026-09-06
+
+summa page decision — file today's decision in the wiki with one command: `summa page decision <TITLE> --entry "..."` creates the entity page if absent (frontmatter, lede placeholder, Decision log, Mentions) or splices a `## Decision log` section in before `## Mentions` on an existing page, preserving every other byte. Supports `--mention` alongside `--entry`, `--date` backfill, a duplicate guard (byte-identical entries after the date prefix are skipped), and a bare form that prints the log newest-first.
+
 ## v0.3.0 — 2026-09-06
 
 The wiki is write-only today: 200+ pages under ~/Notes/wiki that no Claude session consults unless a human remembers to ask. A new `summa relevant <query>` subcommand ranks wiki pages for a query, and a UserPromptSubmit hook injects the top matches into each session's first prompt, the same way recall surfaces memories. Written knowledge starts coming back on its own.
