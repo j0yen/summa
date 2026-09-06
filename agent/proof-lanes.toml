@@ -18,8 +18,8 @@ required_commands = [
 
 [[lane]]
 id = "rust-tests"
-description = "Test-only changes"
-globs = ["tests/**/*.rs"]
+description = "Test-only changes, including fixture data consumed by tests/**/*.rs"
+globs = ["tests/**/*.rs", "tests/fixtures/**"]
 required_commands = [
   "cargo test --workspace",
 ]
