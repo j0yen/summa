@@ -1,0 +1,26 @@
+{
+  "schema": "autobuilder.owner_map.v1",
+  "default_owner": "autobuilder",
+  "routes": [
+    {
+      "glob": "src/**",
+      "owner": "edit-agent"
+    },
+    {
+      "glob": "tests/**",
+      "owner": "edit-agent"
+    },
+    {
+      "glob": "agent/**",
+      "owner": "orchestrator"
+    },
+    {
+      "glob": "Cargo.toml",
+      "owner": "edit-agent (dependency additions only)"
+    },
+    {
+      "glob": "Cargo.lock",
+      "owner": "edit-agent (deps-only iterations)"
+    }
+  ]
+}
