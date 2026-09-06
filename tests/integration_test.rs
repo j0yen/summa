@@ -292,6 +292,293 @@ fn test_frontmatter_no_frontmatter() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// summa page decision — file a decision entry on an entity page
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The hand-made reference fixture: a copy of the real wiki/entities/Fleet
+/// Build Automation.md page, used as ground truth for AC2 (never a fixture
+/// the builder generates from its own output).
+fn hand_made_decision_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("decision")
+}
+
+fn temp_decision_vault() -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().expect("failed to create temp dir");
+    copy_dir_all(&hand_made_decision_fixture_dir(), tmp.path())
+        .expect("failed to copy decision fixture vault");
+    tmp
+}
+
+// AC1: no page for the title -> created page carries entity frontmatter, a
+// lede placeholder, a Decision log with the dated entry, and Mentions, in
+// that order.
+#[test]
+fn test_decision_creates_page_in_order() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let appended = summa::page::decision(
+        root,
+        "New Decision Entity",
+        Some("adopted the new build gate"),
+        None,
+        Some("2026-09-06"),
+    )
+    .expect("decision create failed");
+    assert!(appended, "expected a new entry to be appended");
+
+    let path = root
+        .join("wiki")
+        .join("entities")
+        .join("New Decision Entity.md");
+    assert!(path.exists(), "page not created");
+    let content = fs::read_to_string(&path).expect("read page");
+
+    let fm_pos = content.find("summa: entity").expect("frontmatter missing");
+    let log_pos = content.find("## Decision log").expect("Decision log missing");
+    let mentions_pos = content.find("## Mentions").expect("Mentions missing");
+    assert!(fm_pos < log_pos, "frontmatter should precede Decision log");
+    assert!(log_pos < mentions_pos, "Decision log should precede Mentions");
+    assert!(
+        content.contains("- 2026-09-06: adopted the new build gate"),
+        "dated entry missing: {content}"
+    );
+}
+
+// AC2: appending an entry to a copy of the hand-made Fleet Build Automation
+// page must diff from the original by exactly the new log line plus the
+// `updated:` field.
+#[test]
+fn test_decision_preserves_hand_made_page() {
+    let tmp = temp_decision_vault();
+    let root = tmp.path();
+    let path = root
+        .join("wiki")
+        .join("entities")
+        .join("Fleet Build Automation.md");
+
+    let original = fs::read_to_string(&path).expect("read original fixture");
+
+    summa::page::decision(
+        root,
+        "Fleet Build Automation",
+        Some("replaced polling timer with path-unit trigger"),
+        None,
+        Some("2026-09-06"),
+    )
+    .expect("decision append failed");
+
+    let after = fs::read_to_string(&path).expect("read after append");
+
+    // Everything before the splice point (frontmatter sans `updated:`, plus
+    // the lede) is byte-identical.
+    let original_head = original.split("## Mentions").next().unwrap();
+    let after_head = after.split("## Decision log").next().unwrap();
+    let original_head_no_updated: String = original_head
+        .lines()
+        .filter(|l| !l.starts_with("updated:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let after_head_no_updated: String = after_head
+        .lines()
+        .filter(|l| !l.starts_with("updated:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        original_head_no_updated, after_head_no_updated,
+        "frontmatter/lede bytes before the splice point were disturbed"
+    );
+
+    // Everything from `## Mentions` onward is byte-identical (untouched).
+    let original_tail = &original[original.find("## Mentions").unwrap()..];
+    let after_tail = &after[after.find("## Mentions").unwrap()..];
+    assert_eq!(original_tail, after_tail, "Mentions section was disturbed");
+
+    // Exactly the new dated entry was spliced in before Mentions.
+    assert!(
+        after.contains("## Decision log\n\n- 2026-09-06: replaced polling timer with path-unit trigger\n\n## Mentions"),
+        "Decision log not spliced in before Mentions: {after}"
+    );
+
+    // `updated:` is the only frontmatter field that changed.
+    assert_ne!(
+        original.lines().find(|l| l.starts_with("updated:")),
+        after.lines().find(|l| l.starts_with("updated:")),
+        "updated field should have changed"
+    );
+}
+
+// AC3: a page with Mentions but no Decision log gets the section inserted
+// before Mentions; all other bytes preserved (covered structurally above,
+// this test exercises the from-scratch splice path directly).
+#[test]
+fn test_decision_inserts_section_before_mentions() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let entities_dir = root.join("wiki").join("entities");
+    fs::create_dir_all(&entities_dir).unwrap();
+    let path = entities_dir.join("No Log Yet.md");
+    let original = "---\nsumma: entity\ntitle: No Log Yet\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n\nSome lede text.\n\n## Mentions\n\n- [[Src]] — a mention\n";
+    fs::write(&path, original).unwrap();
+
+    summa::page::decision(root, "No Log Yet", Some("first decision"), None, Some("2026-09-06"))
+        .expect("decision failed");
+
+    let after = fs::read_to_string(&path).unwrap();
+    assert!(after.contains("Some lede text."), "lede text lost");
+    assert!(
+        after.contains("[[Src]] — a mention"),
+        "existing mention lost"
+    );
+    assert!(
+        after.find("## Decision log").unwrap() < after.find("## Mentions").unwrap(),
+        "Decision log not inserted before Mentions"
+    );
+    assert!(after.contains("- 2026-09-06: first decision"));
+}
+
+// AC4: an entry identical to an existing one (after the date prefix) is not
+// appended twice, and the command exits 0 (i.e. returns Ok(false)).
+#[test]
+fn test_decision_dedup() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let first = summa::page::decision(
+        root,
+        "Dedup Entity",
+        Some("same entry text"),
+        None,
+        Some("2026-09-01"),
+    )
+    .expect("first decision failed");
+    assert!(first);
+
+    let second = summa::page::decision(
+        root,
+        "Dedup Entity",
+        Some("same entry text"),
+        None,
+        Some("2026-09-06"),
+    )
+    .expect("second decision failed");
+    assert!(!second, "duplicate entry should not be appended");
+
+    let path = root.join("wiki").join("entities").join("Dedup Entity.md");
+    let content = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        content.matches("same entry text").count(),
+        1,
+        "entry appended twice"
+    );
+}
+
+// AC5: --entry and --mention together land both in one invocation.
+#[test]
+fn test_decision_entry_and_mention_together() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    summa::page::decision(
+        root,
+        "Combo Entity",
+        Some("decided the thing"),
+        Some("[[Some Source]] — claim"),
+        Some("2026-09-06"),
+    )
+    .expect("decision failed");
+
+    let path = root.join("wiki").join("entities").join("Combo Entity.md");
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(content.contains("- 2026-09-06: decided the thing"), "entry missing");
+    assert!(content.contains("[[Some Source]] — claim"), "mention missing");
+}
+
+// AC6: --date overrides today's date.
+#[test]
+fn test_decision_date_override() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    summa::page::decision(
+        root,
+        "Backfilled Entity",
+        Some("backfilled decision"),
+        None,
+        Some("2026-09-01"),
+    )
+    .expect("decision failed");
+
+    let path = root.join("wiki").join("entities").join("Backfilled Entity.md");
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("- 2026-09-01: backfilled decision"),
+        "override date not used: {content}"
+    );
+}
+
+// AC7: the bare form (no flags) prints the existing log newest first.
+#[test]
+fn test_decision_log_newest_first() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    summa::page::decision(root, "Timeline Entity", Some("first"), None, Some("2026-09-01"))
+        .expect("decision 1 failed");
+    summa::page::decision(root, "Timeline Entity", Some("second"), None, Some("2026-09-02"))
+        .expect("decision 2 failed");
+    summa::page::decision(root, "Timeline Entity", Some("third"), None, Some("2026-09-03"))
+        .expect("decision 3 failed");
+
+    let log = summa::page::decision_log(root, "Timeline Entity").expect("decision_log failed");
+    assert_eq!(
+        log,
+        vec![
+            "2026-09-03: third".to_string(),
+            "2026-09-02: second".to_string(),
+            "2026-09-01: first".to_string(),
+        ],
+        "expected newest-first order, got {:?}",
+        log
+    );
+}
+
+// AC8: entry text containing a newline is folded to one line with spaces.
+#[test]
+fn test_decision_entry_newline_folded() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    summa::page::decision(
+        root,
+        "Multiline Entity",
+        Some("first part\nsecond part"),
+        None,
+        Some("2026-09-06"),
+    )
+    .expect("decision failed");
+
+    let path = root.join("wiki").join("entities").join("Multiline Entity.md");
+    let content = fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("- 2026-09-06: first part second part"),
+        "newline not folded to space: {content}"
+    );
+    // The logged bullet is exactly one line — no embedded newline survived.
+    let bullet_line = content
+        .lines()
+        .find(|l| l.starts_with("- 2026-09-06:"))
+        .expect("bullet line missing");
+    assert_eq!(
+        bullet_line, "- 2026-09-06: first part second part",
+        "entry should be folded onto a single line"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AC2: summa ingest (md passthrough)
 // ──────────────────────────────────────────────────────────────────────────────
 

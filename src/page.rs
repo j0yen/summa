@@ -99,6 +99,196 @@ fn append_mention(content: &str, mention: &str, now: &str) -> String {
     }
 }
 
+/// Create or update a decision-log entry on an entity page.
+/// - Creates wiki/entities/<Title>.md if absent, in the shape hand-built pages use:
+///   entity frontmatter, a lede placeholder, `## Decision log` with the dated
+///   entry, then `## Mentions`.
+/// - If the page exists without a `## Decision log` section, the section is
+///   spliced in before `## Mentions` (or appended at the end of the body if
+///   there is no Mentions section); every other byte of the page is preserved.
+/// - If the page already has a `## Decision log`, the entry is appended at the
+///   end of that section, same append-at-section-end behavior as mentions.
+/// - Dedup: an entry byte-identical (after the date prefix) to one already in
+///   the log is not appended twice.
+/// - `mention`, if given, is delegated to the same mention-append machinery
+///   `entity()` uses, so one call can file both.
+///
+/// Returns `true` if a new decision-log line was appended, `false` if no
+/// `entry` was given or the entry was a duplicate (skipped).
+pub fn decision(
+    root: &Path,
+    title: &str,
+    entry: Option<&str>,
+    mention: Option<&str>,
+    date: Option<&str>,
+) -> Result<bool> {
+    let entities_dir = root.join("wiki").join("entities");
+    std::fs::create_dir_all(&entities_dir)?;
+
+    let file_path = entities_dir.join(format!("{}.md", title));
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let date_str = date
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+
+    let mut appended = false;
+
+    if let Some(entry_text) = entry {
+        let normalized_entry = normalize_entry(entry_text);
+
+        if !file_path.exists() {
+            let content = format!(
+                "---\nsumma: entity\ntitle: {}\ncreated: {}\nupdated: {}\n---\n\n## Decision log\n\n- {}: {}\n\n## Mentions\n\n",
+                title, now, now, date_str, normalized_entry
+            );
+            std::fs::write(&file_path, content)
+                .with_context(|| format!("failed to write {}", file_path.display()))?;
+            appended = true;
+        } else {
+            let existing = std::fs::read_to_string(&file_path)
+                .with_context(|| format!("failed to read {}", file_path.display()))?;
+
+            if decision_log_contains(&existing, &normalized_entry) {
+                // Duplicate: skip silently, caller reports it.
+            } else {
+                let updated = append_decision_entry(&existing, &date_str, &normalized_entry, &now);
+                std::fs::write(&file_path, updated)
+                    .with_context(|| format!("failed to write {}", file_path.display()))?;
+                appended = true;
+            }
+        }
+    }
+
+    if let Some(m) = mention {
+        entity(root, title, None, Some(m))?;
+    }
+
+    Ok(appended)
+}
+
+/// Print the Decision log entries for a page, newest first (each without the
+/// leading `- `). Returns an empty vec if the page or its log doesn't exist.
+pub fn decision_log(root: &Path, title: &str) -> Result<Vec<String>> {
+    let file_path = root
+        .join("wiki")
+        .join("entities")
+        .join(format!("{}.md", title));
+
+    if !file_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(&file_path)
+        .with_context(|| format!("failed to read {}", file_path.display()))?;
+
+    let mut entries = decision_log_bullets(&content);
+    entries.reverse();
+    Ok(entries)
+}
+
+/// Fold an entry's newlines to spaces so the log stays a list of one-liners.
+fn normalize_entry(entry: &str) -> String {
+    entry
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Extract the raw bullet lines (without leading `- `) under `## Decision log`,
+/// in file order (oldest first).
+fn decision_log_bullets(content: &str) -> Vec<String> {
+    let Some(pos) = content.find("## Decision log") else {
+        return Vec::new();
+    };
+    let after = &content[pos..];
+    let section_start = pos + after.find('\n').map(|p| p + 1).unwrap_or(after.len());
+    let rest = &content[section_start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    let section_body = &rest[..end];
+
+    section_body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- ").map(|s| s.to_string()))
+        .collect()
+}
+
+/// Strip a leading `YYYY-MM-DD: ` date prefix from a bullet, if present.
+fn strip_date_prefix(bullet: &str) -> &str {
+    let bytes = bullet.as_bytes();
+    let looks_like_date = bytes.len() >= 12
+        && bytes[..10].iter().enumerate().all(|(i, &b)| {
+            if i == 4 || i == 7 {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        && &bullet[10..12] == ": ";
+    if looks_like_date {
+        &bullet[12..]
+    } else {
+        bullet
+    }
+}
+
+/// Does the Decision log already contain this entry (compared after its date
+/// prefix is stripped)?
+fn decision_log_contains(content: &str, entry: &str) -> bool {
+    decision_log_bullets(content)
+        .iter()
+        .any(|b| strip_date_prefix(b) == entry)
+}
+
+/// Append a dated bullet to `## Decision log`, refreshing `updated:`.
+/// - If the section exists, append at its end (same section-end semantics as
+///   `append_mention`), reformatting nothing else in it.
+/// - If it doesn't exist but `## Mentions` does, splice the section in
+///   immediately before Mentions.
+/// - If neither exists, append the section at the end of the body.
+fn append_decision_entry(content: &str, date: &str, entry: &str, now: &str) -> String {
+    let content = update_frontmatter_field(content, "updated", now);
+    let bullet = format!("- {}: {}", date, entry);
+
+    if content.contains("## Decision log") {
+        append_bullet_to_section(&content, "## Decision log", &bullet)
+    } else if let Some(mentions_pos) = content.find("## Mentions") {
+        let before = content[..mentions_pos].trim_end_matches('\n');
+        let after = &content[mentions_pos..];
+        format!("{}\n\n## Decision log\n\n{}\n\n{}", before, bullet, after)
+    } else {
+        let trimmed = content.trim_end_matches('\n');
+        format!("{}\n\n## Decision log\n\n{}\n", trimmed, bullet)
+    }
+}
+
+/// Append a bullet at the end of a named section (before the next `## `
+/// heading, or end of file), same placement rule `append_mention` uses.
+fn append_bullet_to_section(content: &str, section_header: &str, bullet: &str) -> String {
+    let pos = content
+        .find(section_header)
+        .expect("section_header must be present in content");
+    let after = &content[pos..];
+    let section_start = pos + after.find('\n').map(|p| p + 1).unwrap_or(after.len());
+
+    let rest = &content[section_start..];
+    let next_section = rest.find("\n## ").map(|p| section_start + p + 1);
+
+    match next_section {
+        Some(ns) => {
+            let before = &content[..ns];
+            let after = &content[ns..];
+            let before = before.trim_end_matches('\n');
+            format!("{}\n{}\n\n{}", before, bullet, after)
+        }
+        None => {
+            let trimmed = content.trim_end_matches('\n');
+            format!("{}\n{}\n", trimmed, bullet)
+        }
+    }
+}
+
 /// Extract the source link from a mention string like "[[Source]] — claim"
 fn extract_source_link(mention: &str) -> String {
     if let Some(end) = mention.find("]]") {
