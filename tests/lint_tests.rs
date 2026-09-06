@@ -298,3 +298,219 @@ fn test_fix_does_not_modify_source_summaries() {
     let never_pdf = root.join("Clippings").join("never-ingested.pdf");
     assert!(never_pdf.exists(), "never-ingested.pdf should still exist");
 }
+
+// ─── AC1: a file with unparseable frontmatter never aborts the run ──────────
+
+#[test]
+fn test_lint_survives_malformed_frontmatter() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let opts = summa::lint::LintOpts {
+        fix: false,
+        include_human: false,
+        json: false,
+    };
+    let report =
+        summa::lint::run(root, &opts).expect("lint must not abort on malformed frontmatter");
+
+    // The bad file is reported by path with its parser error
+    let bad = report
+        .malformed_frontmatter
+        .iter()
+        .find(|m| m.file.contains("bad-frontmatter"))
+        .unwrap_or_else(|| {
+            panic!(
+                "bad-frontmatter.md not reported as malformed frontmatter: {:?}",
+                report.malformed_frontmatter
+            )
+        });
+    assert!(
+        !bad.error.is_empty(),
+        "expected a non-empty parser error message"
+    );
+
+    // Every other check still ran and reported (the run did not abort)
+    assert!(!report.orphans.is_empty(), "orphans should still be reported");
+    assert!(
+        !report.dangling.is_empty() || !report.repairable_dangling.is_empty(),
+        "dangling should still be reported"
+    );
+    assert!(
+        !report.missing_index.is_empty(),
+        "missing_index should still be reported"
+    );
+    assert!(
+        !report.stale_vs_source.is_empty(),
+        "stale_vs_source should still be reported"
+    );
+    assert!(
+        !report.un_ingested.is_empty(),
+        "un_ingested should still be reported"
+    );
+
+    // A malformed-YAML file with no `summa:` key is not a summa page — it
+    // must not be double-counted as missing-index.
+    assert!(
+        !report
+            .missing_index
+            .iter()
+            .any(|p| p.contains("bad-frontmatter")),
+        "bad-frontmatter.md is not a summa page and should not appear in missing_index"
+    );
+}
+
+// ─── AC3: dangling links split into repairable vs truly-dangling ───────────
+
+#[test]
+fn test_dangling_split_repairable_vs_truly_dangling() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let opts = summa::lint::LintOpts {
+        fix: false,
+        include_human: false,
+        json: false,
+    };
+    let report = summa::lint::run(root, &opts).expect("lint failed");
+
+    // Case-variant reference to "Model Context Protocol" is repairable
+    let has_case_repair = report
+        .repairable_dangling
+        .iter()
+        .any(|d| d.target == "model context protocol" && d.canonical == "Model Context Protocol");
+    assert!(
+        has_case_repair,
+        "expected case-variant repairable finding: {:?}",
+        report.repairable_dangling
+    );
+
+    // Alias reference (aliases: [MCP]) is repairable
+    let has_alias_repair = report
+        .repairable_dangling
+        .iter()
+        .any(|d| d.target == "MCP" && d.canonical == "Model Context Protocol");
+    assert!(
+        has_alias_repair,
+        "expected alias repairable finding: {:?}",
+        report.repairable_dangling
+    );
+
+    // A target matching nothing anywhere survives as truly-dangling
+    let has_truly_dangling = report
+        .dangling
+        .iter()
+        .any(|d| d.target.contains("Totally Missing Page"));
+    assert!(
+        has_truly_dangling,
+        "expected truly-dangling finding: {:?}",
+        report.dangling
+    );
+
+    // Repairable targets must never also appear in the truly-dangling list
+    assert!(
+        !report
+            .dangling
+            .iter()
+            .any(|d| d.target == "model context protocol" || d.target == "MCP"),
+        "repairable targets leaked into truly-dangling: {:?}",
+        report.dangling
+    );
+}
+
+#[test]
+fn test_fix_repairs_dangling_links_idempotent() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let opts = summa::lint::LintOpts {
+        fix: true,
+        include_human: false,
+        json: false,
+    };
+    let report1 = summa::lint::run(root, &opts).expect("lint --fix run 1");
+
+    let repaired: Vec<&summa::lint::FixRecord> = report1
+        .fixed
+        .iter()
+        .filter(|f| f.change.starts_with("repaired link:"))
+        .collect();
+    assert!(
+        !repaired.is_empty(),
+        "expected repaired-link fixes: {:?}",
+        report1.fixed
+    );
+
+    let refs_path = root
+        .join("wiki")
+        .join("entities")
+        .join("Repairable Refs.md");
+    let content = fs::read_to_string(&refs_path).expect("read Repairable Refs.md");
+    assert!(
+        content.contains("[[Model Context Protocol]]"),
+        "case-variant link not repaired to canonical: {}",
+        content
+    );
+    assert!(
+        !content.contains("[[model context protocol]]"),
+        "lowercase link still present after fix: {}",
+        content
+    );
+    assert!(
+        !content.contains("[[MCP]]"),
+        "alias link still present after fix: {}",
+        content
+    );
+    assert!(
+        content.contains("Totally Missing Page"),
+        "truly-dangling link should survive verbatim: {}",
+        content
+    );
+
+    // Second immediate run: idempotent — no further repaired-link fixes
+    let report2 = summa::lint::run(root, &opts).expect("lint --fix run 2");
+    let repaired2: Vec<&summa::lint::FixRecord> = report2
+        .fixed
+        .iter()
+        .filter(|f| f.change.starts_with("repaired link:"))
+        .collect();
+    assert!(
+        repaired2.is_empty(),
+        "second --fix run still repaired links (not idempotent): {:?}",
+        repaired2
+    );
+}
+
+// ─── AC6: --json carries counts plus per-finding arrays for the new fields ──
+
+#[test]
+fn test_lint_json_includes_new_fields() {
+    let tmp = temp_vault();
+    let root = tmp.path();
+
+    let opts = summa::lint::LintOpts {
+        fix: false,
+        include_human: false,
+        json: true,
+    };
+    let report = summa::lint::run(root, &opts).expect("lint failed");
+    let json = serde_json::to_value(&report).expect("serialize report");
+
+    for field in [
+        "orphans",
+        "dangling",
+        "repairable_dangling",
+        "malformed",
+        "malformed_frontmatter",
+        "missing_index",
+        "stale_vs_source",
+        "un_ingested",
+        "fixed",
+    ] {
+        assert!(
+            json.get(field).is_some(),
+            "expected field `{}` in lint --json output",
+            field
+        );
+    }
+}

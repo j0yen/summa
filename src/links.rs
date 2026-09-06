@@ -13,6 +13,16 @@ pub struct DanglingLink {
     pub in_files: Vec<String>,
 }
 
+/// A dangling link whose target normalizes (case, spacing, or a known
+/// `aliases:` entry) to an existing page's stem.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepairableLink {
+    pub target: String,
+    pub canonical: String,
+    #[serde(rename = "in")]
+    pub in_files: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MalformedLink {
     pub file: String,
@@ -30,8 +40,22 @@ pub struct LinkStats {
 pub struct LinksReport {
     pub orphans: Vec<String>,
     pub dangling: Vec<DanglingLink>,
+    pub repairable_dangling: Vec<RepairableLink>,
     pub malformed: Vec<MalformedLink>,
     pub stats: LinkStats,
+}
+
+/// Normalize a stem/target/alias for fuzzy matching: fold `_`/`-` to spaces,
+/// collapse whitespace, lowercase. Used only to find repair *candidates* —
+/// exact (case-sensitive) matches are always resolved first and never
+/// touched by this normalization, so two pages differing only in case are
+/// never merged.
+fn normalize_title(s: &str) -> String {
+    let folded: String = s
+        .chars()
+        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
 /// Parse wikilinks from text content.
@@ -54,8 +78,13 @@ pub fn parse_wikilinks(content: &str) -> (Vec<String>, Vec<(String, String)>) {
             // Extract target (before \|)
             let target = inner.split("\\|").next().unwrap_or("").trim().to_string();
             // Alias is the part after \|
-            let alias = inner.split_once("\\|").map(|x| x.1).unwrap_or("").trim().to_string();
-            // Fix: strip the alias entirely if all-digit or empty, else keep as proper |
+            let alias = inner
+                .split_once("\\|")
+                .map(|x| x.1)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            // Fix: strip the alias entirely if empty or all-digit, else keep as proper |
             let fix = if alias.is_empty() || alias.chars().all(|c| c.is_ascii_digit()) {
                 format!("[[{}]]", target)
             } else {
@@ -112,9 +141,22 @@ pub fn run(root: &Path) -> Result<LinksReport> {
     // Build stem map: lowercase(stem) -> [paths]
     let mut stem_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut stem_map_case: HashMap<String, Vec<PathBuf>> = HashMap::new(); // case-sensitive
+    // Normalized (case/spacing-folded) stem -> [paths]; used only for repair candidates.
+    let mut normalized_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // Normalized alias -> [paths], sourced from each page's `aliases:` frontmatter.
+    let mut alias_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // The vault's established link convention is a page's frontmatter `title`
+    // (index.rs and page.rs both write `[[title]]`), which commonly differs
+    // from its on-disk (often slugified) stem. A repair must rewrite to the
+    // *title*, not the stem — otherwise it fights index regeneration forever.
+    let mut title_map: HashMap<PathBuf, String> = HashMap::new();
+    // Exact title text -> [paths]; an exact-title link is already canonical
+    // and resolves like an exact-stem match — never a repair candidate.
+    let mut title_map_case: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
     for path in &md_files {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        if let Some(stem) = stem {
             stem_map
                 .entry(stem.to_lowercase())
                 .or_default()
@@ -123,6 +165,39 @@ pub fn run(root: &Path) -> Result<LinksReport> {
                 .entry(stem.to_string())
                 .or_default()
                 .push(path.clone());
+            normalized_map
+                .entry(normalize_title(stem))
+                .or_default()
+                .push(path.clone());
+        }
+
+        // Malformed frontmatter is reported by `lint`; here we just skip it —
+        // a page with no usable aliases/title is not a repair candidate source.
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(Some(fm)) = crate::frontmatter::parse_frontmatter(&content) {
+                if let Some(aliases) = fm.aliases {
+                    for alias in aliases {
+                        alias_map
+                            .entry(normalize_title(&alias))
+                            .or_default()
+                            .push(path.clone());
+                    }
+                }
+                let title = fm.title.unwrap_or_else(|| stem.unwrap_or("").to_string());
+                normalized_map
+                    .entry(normalize_title(&title))
+                    .or_default()
+                    .push(path.clone());
+                title_map_case
+                    .entry(title.clone())
+                    .or_default()
+                    .push(path.clone());
+                title_map.insert(path.clone(), title);
+            } else if let Some(stem) = stem {
+                title_map.insert(path.clone(), stem.to_string());
+            }
+        } else if let Some(stem) = stem {
+            title_map.insert(path.clone(), stem.to_string());
         }
     }
 
@@ -134,6 +209,8 @@ pub fn run(root: &Path) -> Result<LinksReport> {
 
     // For dangling: target -> set of files that reference it
     let mut dangling_map: HashMap<String, HashSet<String>> = HashMap::new();
+    // For repairable dangling: target -> (canonical stem, set of files that reference it)
+    let mut repairable_map: HashMap<String, (String, HashSet<String>)> = HashMap::new();
     // For malformed: (file, raw, fix)
     let mut malformed_links: Vec<MalformedLink> = Vec::new();
 
@@ -160,16 +237,49 @@ pub fn run(root: &Path) -> Result<LinksReport> {
 
         // Resolve targets
         for target in &targets {
-            // Case-sensitive first
-            if let Some(resolved) = stem_map_case.get(target).and_then(|v| v.first()) {
-                *inbound.entry(resolved.clone()).or_insert(0) += 1;
-            } else if let Some(resolved) = stem_map
-                .get(&target.to_lowercase())
+            // Exact match (stem or title) always wins first — this is what
+            // keeps two pages differing only in case from ever being merged
+            // by the normalization fallback below, and what keeps an
+            // already-canonical title link from being flagged as a repair.
+            if let Some(resolved) = stem_map_case
+                .get(target)
                 .and_then(|v| v.first())
+                .or_else(|| title_map_case.get(target).and_then(|v| v.first()))
             {
                 *inbound.entry(resolved.clone()).or_insert(0) += 1;
+                continue;
+            }
+
+            // No exact match: look for a normalizable match (case, spacing,
+            // or a known alias) — these are repairable, not truly dangling.
+            let norm_target = normalize_title(target);
+            let repair_candidate = stem_map
+                .get(&target.to_lowercase())
+                .and_then(|v| v.first())
+                .or_else(|| normalized_map.get(&norm_target).and_then(|v| v.first()))
+                .or_else(|| alias_map.get(&norm_target).and_then(|v| v.first()));
+
+            if let Some(resolved) = repair_candidate {
+                *inbound.entry(resolved.clone()).or_insert(0) += 1;
+                // Repair to the vault's established link convention: the
+                // target page's title (falling back to its stem), matching
+                // what index.rs/page.rs already write.
+                let canonical = title_map
+                    .get(resolved)
+                    .cloned()
+                    .or_else(|| {
+                        resolved
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| target.clone());
+                let entry = repairable_map
+                    .entry(target.clone())
+                    .or_insert_with(|| (canonical, HashSet::new()));
+                entry.1.insert(rel_path.to_string_lossy().into_owned());
             } else {
-                // Dangling
+                // Truly dangling
                 dangling_map
                     .entry(target.clone())
                     .or_default()
@@ -219,9 +329,25 @@ pub fn run(root: &Path) -> Result<LinksReport> {
         .collect();
     dangling.sort_by(|a, b| a.target.cmp(&b.target));
 
+    // Build repairable-dangling list
+    let mut repairable_dangling: Vec<RepairableLink> = repairable_map
+        .into_iter()
+        .map(|(target, (canonical, files))| {
+            let mut in_files: Vec<String> = files.into_iter().collect();
+            in_files.sort();
+            RepairableLink {
+                target,
+                canonical,
+                in_files,
+            }
+        })
+        .collect();
+    repairable_dangling.sort_by(|a, b| a.target.cmp(&b.target));
+
     Ok(LinksReport {
         orphans,
         dangling,
+        repairable_dangling,
         malformed: malformed_links,
         stats: LinkStats {
             pages: md_files.len(),
@@ -239,9 +365,20 @@ pub fn print_human(report: &LinksReport) {
         println!("  {}", o);
     }
 
-    println!("\nDangling ({}):", report.dangling.len());
+    println!("\nDangling — truly-dangling ({}):", report.dangling.len());
     for d in &report.dangling {
         println!("  [[{}]] referenced in:", d.target);
+        for f in &d.in_files {
+            println!("    {}", f);
+        }
+    }
+
+    println!(
+        "\nDangling — repairable ({}):",
+        report.repairable_dangling.len()
+    );
+    for d in &report.repairable_dangling {
+        println!("  [[{}]] → [[{}]] referenced in:", d.target, d.canonical);
         for f in &d.in_files {
             println!("    {}", f);
         }
