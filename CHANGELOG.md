@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.0 — 2026-09-06
+
+The wiki is write-only today: 200+ pages under ~/Notes/wiki that no Claude session consults unless a human remembers to ask. A new `summa relevant <query>` subcommand ranks wiki pages for a query, and a UserPromptSubmit hook injects the top matches into each session's first prompt, the same way recall surfaces memories. Written knowledge starts coming back on its own.
+
 ## v0.2.0 — 2026-06-21
 
 ### Added
