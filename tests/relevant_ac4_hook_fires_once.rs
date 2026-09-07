@@ -32,7 +32,15 @@ fn run_hook(state_dir: &std::path::Path, summa_bin: &str, payload: &str) -> Outp
         .stdout(Stdio::piped())
         .spawn()
         .expect("failed to spawn hook");
-    child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+    // The hook may exit (and close stdin) before ever reading it —
+    // e.g. AC6 when SUMMA_BIN is not executable, the script exits at
+    // its very first check, before `cat -` runs. That races this
+    // write against the child closing the pipe, intermittently
+    // producing BrokenPipe. A closed stdin is a valid outcome here
+    // (the child chose not to read), not a test failure, so the
+    // write error is ignored rather than unwrapped
+    // (PRD-summa-gate-debt flake-audit).
+    let _ = child.stdin.take().unwrap().write_all(payload.as_bytes());
     child.wait_with_output().expect("hook did not run")
 }
 
