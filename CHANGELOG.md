@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.6.2 — 2026-09-07
+
+Version-only bump to tag the trailing flake-audit fix (BrokenPipe race in
+relevant_ac4_hook_fires_once) that landed after v0.6.1 without a version
+bump, which was blocking PRD-summa-lint-selfreview's gate/tag/archive step.
+No feature code; extend-gate.sh already confirms verdict=pass at this HEAD.
+
 ## v0.6.1 — 2026-09-06
 
 Three summa PRDs have finished code and green tests but cannot tag or archive:
