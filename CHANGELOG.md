@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.6.1 — 2026-09-06
+
+Three summa PRDs have finished code and green tests but cannot tag or archive:
+the gate reports ~10 blocking receipts that are repo debt, not PRD defects.
+This release pays that debt at the repo level: adds scripts/run-metrics.sh,
+scripts/audit.sh, scripts/risk-gate.sh (and vendored rules/audit-checks.sh)
+so intake/proof-receipt/session-trace/risk-gate stop aborting; bumps
+rust-version to 1.88 to match what the locked deps actually require;
+resolves the lopdf RUSTSEC advisory via a pdf-extract bump and adds
+deny.toml so cargo-deny's license check has an allow list; adds a minimal
+CI workflow; copies the ac-traceability PRD into the repo root; and
+backfills annotated tags v0.5.0/v0.6.0 so receipt base_ref lineage stops
+mis-attributing sibling diffs. No feature code.
+
 ## v0.6.0 — 2026-09-06
 
 summa-lint-selfreview: fixed vti-plan unrouted-paths block (widened rust-tests lane glob to include tests/fixtures/**, verified unrouted=0/pass) and fixed reviewer-agent's AC5 finding (duplicate summa-lint block in self-review-skill SKILL.md emitted two summa: lines on malformed frontmatter; removed the buggy Phase A duplicate, kept the correct Phase B.5 block using summa-malformed: prefix). self-review-skill commit 649ca4d pushed directly to its own origin (not shared build_into). Repo-wide/host-wide blockers (intake, proof-receipt/ctrace-permission, risk-gate, ci-checks, session-trace, msrv-verify, ac-traceability, flake-audit) left as previously confirmed systemic, not re-run in full this tick.

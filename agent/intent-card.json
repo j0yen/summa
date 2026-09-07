@@ -1,8 +1,8 @@
 {
   "schema": "autobuilder.intent_card.v1",
-  "prd_source": "/home/jsy/Documents/PRDs/build-queue/PRD-summa-lint-selfreview.md",
-  "intent_slug": "summa-lint-selfreview",
-  "root_motivation": "Two failures observed 2026-09-05. First, brittleness: `summa lint` hard-errored with `did not find expected key at line 11 column 28` and reported nothing, because three human-authored files (references/cagan-*.md) carried unquoted `[[wikilinks]]` in frontmatter; one bad file silenced every health check for the whole vault, for however long those files sat there. Second, neglect: once the files were hand-fixed, lint's own numbers showed nothing consumes them \u2014 orphans 185, dangling 646, missing_index 1545, un_ingested 118. There is no loop in which anyone runs lint, so findings accumulate without a reader. /self-review already tends this laptop daily and journals to ~/brain/journal/; the wiki is simply absent from its checklist.",
+  "prd_source": "/home/jsy/Documents/PRDs/build-queue/PRD-summa-gate-debt.md",
+  "intent_slug": "summa-gate-debt",
+  "root_motivation": "Three summa PRDs have finished code and green tests but cannot tag or archive: the gate reports ~10 blocking receipts that are repo debt, not PRD defects. Verified on the redbaron checkout: no `scripts/` dir (run-metrics.sh and audit.sh missing, which kills intake/proof-receipt/session-trace and risk-gate), no `.github/workflows/` (ci-checks counts 0 runs), `rust-version = \"1.85\"` while locked deps need 1.88 (msrv-verify and flake-audit red), no fixtures lane in `agent/proof-lanes.toml` (vti-plan flags non-.rs fixture files), no ac-traceability source in the repo, cargo-deny findings (lopdf advisory via pdf-extract, a rejected license), and tags stopped at v0.4.0 so receipt base_refs mis-attribute sibling diffs. Fix them once, at the repo level.",
   "user_persona": "UNSPECIFIED \u2014 no existing intent card to carry forward from; set by hand (intent-card-refresh.sh cannot source this from a PRD).",
   "unfakeable_metric": {
     "name": "acceptance_tests_passing_count",
@@ -14,50 +14,62 @@
     {
       "id": "AC1",
       "level": "MUST",
-      "description": "Given a vault copy containing a file with unquoted `[[wikilink]]` frontmatter (the cagan shape), When `summa lint` runs, Then it reports that file as malformed with the parser error and still reports every other check's counts.",
-      "test": "tests/relevant_ac1_known_item_rank.rs"
+      "description": "Given the extended repo, When `autobuilder loop --iteration 0 --trace` runs, Then it no longer aborts on missing `scripts/run-metrics.sh` and the intake, proof-receipt, and session-trace receipts are produced.",
+      "test": "tests/acceptance_ac1.rs"
     },
     {
       "id": "AC2",
       "level": "MUST",
-      "description": "Given the live vault, When `summa lint --fix` runs, Then missing_index is 0, and a second immediate run changes nothing and still reports 0.",
-      "test": "tests/relevant_ac2_no_match.rs"
+      "description": "Given `scripts/audit.sh` exists, When the gate's risk-gate producer runs, Then the risk-gate receipt is produced instead of reported missing.",
+      "test": "tests/acceptance_ac2.rs"
     },
     {
       "id": "AC3",
       "level": "MUST",
-      "description": "Given a dangling link whose target exists under a case-variant name, When `--fix` runs, Then the link is repaired; Given a link whose target exists nowhere, Then it survives verbatim and is reported truly-dangling.",
-      "test": "tests/relevant_ac3_malformed_skip.rs"
+      "description": "Given `rust-version = \"1.88\"`, When msrv-verify runs its toolchain check three times, Then all runs exit 0 and the flake-audit receipt stops flagging the MSRV check.",
+      "test": "tests/acceptance_ac3.rs"
     },
     {
       "id": "AC4",
       "level": "MUST",
-      "description": "Given a machine without summa on PATH, When the new /self-review block executes, Then it emits nothing and the review continues.",
-      "test": "tests/relevant_ac4_hook_fires_once.rs"
+      "description": "Given the fixtures lane in proof-lanes.toml, When `autobuilder vti-plan --project .` runs at HEAD, Then `tests/fixtures/vault/**` paths route with nonzero confidence and vti-plan reports unrouted=0.",
+      "test": "tests/acceptance_ac4.rs"
     },
     {
       "id": "AC5",
       "level": "MUST",
-      "description": "Given summa present, When the /self-review block executes, Then exactly one `summa:` line with counts lands in the day's journal.",
+      "description": "Given the ac-traceability source is in place, When that receipt producer runs, Then it stops reporting \"no PRD-*.md found in project root\".",
       "test": "tests/acceptance_ac5.rs"
     },
     {
       "id": "AC6",
-      "level": "SHOULD",
-      "description": "Given `--json`, When it runs, Then output parses and carries counts plus per-finding arrays for malformed, dangling (split), orphans, and un-ingested.",
+      "level": "MUST",
+      "description": "Given the dependency and deny.toml changes, When `cargo deny check advisories licenses` runs, Then the lopdf advisory and the rejected-license finding are both resolved, and `cargo test` stays fully green.",
       "test": "tests/acceptance_ac6.rs"
     },
     {
       "id": "AC7",
       "level": "MUST",
-      "description": "Given this PRD's build on the live vault, When the backlog pass completes, Then the ship note records before/after counts and missing_index after is 0.",
-      "test": "tests/relevant_ac7_stdin_equivalence.rs"
+      "description": "Given the backfilled tags, When `git describe --tags` runs at the v0.6.0 commit and at HEAD, Then base_ref resolution yields v0.6.0 (not v0.4.0), and both tags are annotated and pushed.",
+      "test": "tests/acceptance_ac7.rs"
     },
     {
       "id": "AC8",
-      "level": "MAY",
-      "description": "Given `--fix` with repairs performed, When it completes, Then a one-line summary states files touched, links repaired, and index entries added.",
-      "test": "tests/relevant_ac8_json_format.rs"
+      "level": "MUST",
+      "description": "Given all P0 fixes landed, When `extend-gate.sh /home/jsy/repos/summa --head <landed sha>` runs, Then the blocking set contains none of: intake, proof-receipt, session-trace, risk-gate, msrv-verify, flake-audit, vti-plan, ac-traceability (ci-checks and reviewer-agent may still block pending CI history).",
+      "test": "tests/acceptance_ac8.rs"
+    },
+    {
+      "id": "AC9",
+      "level": "SHOULD",
+      "description": "Given the pushed workflow, When one CI run completes on GitHub, Then a subsequent gate run's ci-checks receipt reports run_count >= 1.",
+      "test": "tests/acceptance_ac9.rs"
+    },
+    {
+      "id": "AC10",
+      "level": "MUST",
+      "description": "Given the finished diff, When version and tests are checked, Then Cargo.toml is 0.6.1, `cargo test` is fully green, and clippy is clean on the diff.",
+      "test": "tests/acceptance_ac10.rs"
     }
   ],
   "scope": [],
@@ -74,14 +86,5 @@
       "a": "No. This card was mechanically regenerated from the landed PRD's frontmatter and body by scripts/intent-card-refresh.sh; no five-whys interview ran. See prd_source for the human-authored PRD (/home/jsy/Documents/PRDs/build-queue/PRD-summa-relevant-recall.md) this ships from."
     }
   ],
-  "created_at": "2026-09-06T00:00:00Z",
-  "carried_forward": {
-    "user_persona": false,
-    "unfakeable_metric": false,
-    "scope": false,
-    "non_goals": false,
-    "hard_constraints": false,
-    "five_whys_trace": false,
-    "created_at": false
-  }
+  "created_at": "2026-09-06T00:00:00Z"
 }

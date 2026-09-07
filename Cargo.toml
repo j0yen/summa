@@ -1,8 +1,8 @@
 [package]
 name = "summa"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "CLI mechanics layer for summa: an LLM-maintained wiki on Obsidian vaults"
 authors = ["Joe Yen <jyen.tech@gmail.com>"]
 license = "MIT"
@@ -24,7 +24,7 @@ walkdir = "2"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
-pdf-extract = "0.7"
+pdf-extract = "0.12"
 ureq = { version = "2", features = ["tls"] }
 html2text = "0.6"
 sigpipe = "0.1"

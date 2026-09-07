@@ -35,7 +35,28 @@ required_commands = [
 [[lane]]
 id = "meta"
 description = "Orchestrator-owned scaffold metadata (agent/** and repo hygiene). Not edit-agent-owned; no build proof applies, only intent-card schema validation."
-globs = ["agent/**", ".gitignore", "CHANGELOG.md", "README.md", "LICENSE-*", "extended-gates.toml", "PRD-*.md"]
+globs = ["agent/**", ".gitignore", "CHANGELOG.md", "README.md", "LICENSE-*", "extended-gates.toml", "PRD-*.md", "rules/**"]
 required_commands = [
   "autobuilder intake --validate agent/intent-card.json",
+]
+
+[[lane]]
+id = "ci"
+description = "GitHub Actions workflow changes (added by PRD-summa-gate-debt: repo had no .github/workflows/ before)"
+globs = [".github/workflows/**"]
+required_commands = [
+  "cargo check --workspace",
+]
+
+[[lane]]
+id = "harness-readonly"
+description = "Harness files added by PRD-summa-gate-debt (modeled on mcphost's working scaffold); should never change again after this landing. Any future change to a harness-readonly path fails the gate — use an intent-card amendment to legitimately modify."
+globs = [
+  "scripts/run-metrics.sh",
+  "scripts/audit.sh",
+  "scripts/risk-gate.sh",
+  "deny.toml",
+]
+required_commands = [
+  "exit 1",
 ]
